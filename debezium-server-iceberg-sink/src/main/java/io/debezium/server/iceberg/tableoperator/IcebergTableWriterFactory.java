@@ -57,6 +57,16 @@ public class IcebergTableWriterFactory {
     }
   }
 
+  public BaseTaskWriter<Record> createAppendWriter(Table icebergTable) {
+    FileFormat format = IcebergUtil.getTableFileFormat(icebergTable);
+    GenericAppenderFactory appenderFactory = IcebergUtil.getTableAppender(icebergTable);
+    OutputFileFactory fileFactory = IcebergUtil.getTableOutputFileFactory(icebergTable, format);
+    long targetFileSize =
+        PropertyUtil.propertyAsLong(
+            icebergTable.properties(), WRITE_TARGET_FILE_SIZE_BYTES, WRITE_TARGET_FILE_SIZE_BYTES_DEFAULT);
+    return appendWriter(icebergTable, format, appenderFactory, fileFactory, targetFileSize);
+  }
+
   private BaseTaskWriter<Record> appendWriter(Table icebergTable, FileFormat format, GenericAppenderFactory appenderFactory, OutputFileFactory fileFactory, long targetFileSize) {
 
     if (icebergTable.spec().isUnpartitioned()) {

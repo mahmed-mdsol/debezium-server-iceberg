@@ -23,18 +23,24 @@ import jakarta.inject.Inject;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
 import org.apache.iceberg.AppendFiles;
+import org.apache.iceberg.OverwriteFiles;
 import org.apache.iceberg.RowDelta;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.UpdateSchema;
+import org.apache.iceberg.data.IcebergGenerics;
 import org.apache.iceberg.data.Record;
+import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.io.BaseTaskWriter;
+import org.apache.iceberg.io.CloseableIterable;
 import org.apache.iceberg.io.WriteResult;
+import org.apache.iceberg.types.Types;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -205,6 +211,13 @@ public class IcebergTableOperator {
   private void addToTablePerSchema(Table icebergTable, List<EventConverter> events) {
     // Initialize a task writer to write both INSERT and equality DELETE.
     final Schema tableSchema = icebergTable.schema();
+    if (config.iceberg().upsert()
+        && config.iceberg().isUpsertCopyOnWriteMode()
+        && !tableSchema.identifierFieldIds().isEmpty()) {
+      addToTablePerSchemaCopyOnWrite(icebergTable, events, tableSchema);
+      return;
+    }
+
     BaseTaskWriter<Record> writer = writerFactory.create(icebergTable);
     try (writer) {
       for (EventConverter e : events) {
@@ -246,6 +259,61 @@ public class IcebergTableOperator {
         LOGGER.debug("OpenLineage emission failed (non-critical)", e);
       }
     }
+  }
+
+  private void addToTablePerSchemaCopyOnWrite(
+      Table icebergTable, List<EventConverter> events, Schema tableSchema) {
+    List<String> identifierFieldNames =
+        tableSchema.columns().stream()
+            .filter(column -> tableSchema.identifierFieldIds().contains(column.fieldId()))
+            .map(Types.NestedField::name)
+            .toList();
+    Map<List<Object>, RecordWrapper> incomingByKey = new LinkedHashMap<>();
+    for (EventConverter e : events) {
+      RecordWrapper record = (RecordWrapper) e.convert(tableSchema);
+      incomingByKey.put(identifierValues(record, identifierFieldNames), record);
+    }
+
+    BaseTaskWriter<Record> writer = writerFactory.createAppendWriter(icebergTable);
+    try (writer; CloseableIterable<Record> existingRows = IcebergGenerics.read(icebergTable).build()) {
+      for (Record existingRow : existingRows) {
+        List<Object> key = identifierValues(existingRow, identifierFieldNames);
+        RecordWrapper replacement = incomingByKey.remove(key);
+        if (replacement == null) {
+          writer.write(existingRow);
+        } else if (replacement.op() != Operation.DELETE || config.iceberg().keepDeletes()) {
+          writer.write(replacement);
+        }
+      }
+
+      for (RecordWrapper replacement : incomingByKey.values()) {
+        if (replacement.op() != Operation.DELETE || config.iceberg().keepDeletes()) {
+          writer.write(replacement);
+        }
+      }
+
+      WriteResult files = writer.complete();
+      OverwriteFiles overwrite = icebergTable.newOverwrite().overwriteByRowFilter(Expressions.alwaysTrue());
+      Arrays.stream(files.dataFiles()).forEach(overwrite::addFile);
+      overwrite.commit();
+    } catch (IOException ex) {
+      try {
+        writer.abort();
+      } catch (IOException e) {
+        // pass
+      }
+      throw new DebeziumException(
+          "Failed to write data to table:`" + icebergTable.name() + "`", ex);
+    }
+
+    LOGGER.info(
+        "Committed {} events to table in copy-on-write mode! {}",
+        events.size(),
+        icebergTable.location());
+  }
+
+  private List<Object> identifierValues(Record row, List<String> identifierFieldNames) {
+    return identifierFieldNames.stream().map(row::getField).toList();
   }
 
   private ConnectorContext getOpenLineageContext() {

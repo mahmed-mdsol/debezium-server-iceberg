@@ -21,6 +21,7 @@ When event and key schema information is enabled (`debezium.format.value.schemas
 | `debezium.sink.iceberg.write.format.default`                 | `parquet`                                                     | Default file format for Iceberg tables: `parquet`, `avro`, or `orc`                                                                                                                                                                                                                                               |
 | `debezium.sink.iceberg.allow-field-addition`                 | `true`                                                        | Allow field addition to target tables. Enables automatic schema evolution, expansion.                                                                                                                                                                                                                             |
 | `debezium.sink.iceberg.upsert`                               | `false`                                                       | Upsert mode overwrites updated rows. Any existing rows that are updated will be overwritten with the new values. Explained further below.                                                                                                                                                                         |
+| `debezium.sink.iceberg.upsert-write-mode`                    | `merge-on-read`                                               | Upsert write semantics. Supported values: `merge-on-read` (current behavior, equality-delete files + row delta commits) and `copy-on-write` (rewrites the latest table snapshot during upsert commits).                                                                                                           |
 | `debezium.sink.iceberg.upsert-keep-deletes`                  | `true`                                                        | When running in upsert mode, deleted rows are marked as deleted but retained in the target table (soft delete)                                                                                                                                                                                                    |
 | `debezium.sink.iceberg.upsert-dedup-column`                  | ``                                                            | With upsert mode this field can be used to deduplicate data. If it's set the row with the greatest value of the field is retained.                                                                                                                                                                                |
 | `debezium.sink.iceberg.upsert-op-field`                      | `__op`                                                        | Field name for operation type in upsert mode. _dont change!_                                                                                                                                                                                                                                                      |
@@ -60,6 +61,13 @@ When enabled, (`debezium.sink.iceberg.upsert=true`) the
 consumer utilizes the source table's primary key to perform upsert operations on the target Iceberg table, effectively
 deleting existing rows and inserting updated ones. For tables lacking a primary key, the consumer reverts to append-only
 mode.
+
+#### Upsert Write Semantics
+
+Use `debezium.sink.iceberg.upsert-write-mode` to control how upsert changes are committed:
+
+- `merge-on-read` (default): writes data files and equality-delete files (`RowDelta` commit).
+- `copy-on-write`: rewrites the latest table snapshot on each upsert commit, producing copy-on-write style updates.
 
 #### Upsert Mode Data Deduplication
 

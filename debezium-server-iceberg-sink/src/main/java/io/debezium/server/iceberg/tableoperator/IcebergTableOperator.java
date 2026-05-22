@@ -261,6 +261,13 @@ public class IcebergTableOperator {
     }
   }
 
+  /**
+   * Commits upsert batches in copy-on-write mode.
+   *
+   * <p>This performs a full snapshot rewrite: it scans the latest table rows, applies incoming
+   * upsert/delete changes by identifier key, writes replacement data files, and commits using an
+   * overwrite operation for the entire table.
+   */
   private void addToTablePerSchemaCopyOnWrite(
       Table icebergTable, List<EventConverter> events, Schema tableSchema) {
     List<String> identifierFieldNames =
@@ -300,7 +307,7 @@ public class IcebergTableOperator {
       try {
         writer.abort();
       } catch (IOException e) {
-        // pass
+        LOGGER.debug("Failed to abort copy-on-write writer for table {}", icebergTable.name(), e);
       }
       throw new DebeziumException(
           "Failed to write data to table:`" + icebergTable.name() + "`", ex);

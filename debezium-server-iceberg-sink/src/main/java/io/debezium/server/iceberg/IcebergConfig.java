@@ -3,6 +3,7 @@ package io.debezium.server.iceberg;
 import static org.apache.iceberg.TableProperties.DEFAULT_FILE_FORMAT;
 import static org.apache.iceberg.TableProperties.DEFAULT_FILE_FORMAT_DEFAULT;
 
+import io.debezium.DebeziumException;
 import io.quarkus.runtime.annotations.ConfigRoot;
 import io.smallrye.config.ConfigMapping;
 import io.smallrye.config.WithDefault;
@@ -37,6 +38,10 @@ public interface IcebergConfig {
   @WithName("debezium.sink.iceberg.upsert-keep-deletes")
   @WithDefault("true")
   boolean keepDeletes();
+
+  @WithName("debezium.sink.iceberg.upsert-write-mode")
+  @WithDefault("merge-on-read")
+  String upsertWriteMode();
 
   @WithName("debezium.sink.iceberg." + CatalogProperties.WAREHOUSE_LOCATION)
   String warehouseLocation();
@@ -103,6 +108,20 @@ public interface IcebergConfig {
   @WithName("debezium.sink.iceberg.openlineage-enabled")
   @WithDefault("false")
   boolean openlineageEnabled();
+
+  default boolean isUpsertCopyOnWriteMode() {
+    return "copy-on-write".equalsIgnoreCase(upsertWriteMode());
+  }
+
+  default void validateUpsertWriteMode() {
+    String mode = upsertWriteMode();
+    if (!"merge-on-read".equalsIgnoreCase(mode) && !"copy-on-write".equalsIgnoreCase(mode)) {
+      throw new DebeziumException(
+          "Unsupported upsert write mode: `"
+              + mode
+              + "`. Supported values are `merge-on-read` and `copy-on-write`.");
+    }
+  }
 
   /** Gets the partitionBy value for a given table, falling back to global if not specified. */
   default List<String> partitionByForTable(String destination) {

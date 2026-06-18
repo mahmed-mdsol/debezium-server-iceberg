@@ -4,6 +4,8 @@ debezium.sink.type=iceberg
 # Iceberg sink config
 debezium.sink.iceberg.table-prefix=debeziumcdc_
 debezium.sink.iceberg.upsert=true
+# supported values: merge-on-read, copy-on-write
+debezium.sink.iceberg.upsert-write-mode=merge-on-read
 debezium.sink.iceberg.upsert-keep-deletes=true
 debezium.sink.iceberg.write.format.default=parquet
 debezium.sink.iceberg.catalog-name=iceberg

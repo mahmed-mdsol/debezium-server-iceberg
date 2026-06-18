@@ -88,6 +88,7 @@ public class IcebergChangeConsumer
   @PostConstruct
   void connect() {
     config.debezium().validateTemporalPrecisionMode();
+    config.iceberg().validateUpsertWriteMode();
 
     JsonEventConverter.initializeStaticSerdes();
     keyValueChangeEventFormat = config.debezium().keyValueChangeEventFormat();

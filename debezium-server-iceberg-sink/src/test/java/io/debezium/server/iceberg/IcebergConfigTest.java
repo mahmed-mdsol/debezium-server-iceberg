@@ -1,14 +1,13 @@
 package io.debezium.server.iceberg;
 
+import io.debezium.DebeziumException;
 import io.smallrye.config.SmallRyeConfigBuilder;
-import org.eclipse.microprofile.config.ConfigProvider;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 
 import java.util.Collections;
 import java.util.List;
 import java.util.Map;
-import java.util.Optional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -23,6 +22,7 @@ class IcebergConfigTest {
                 .withDefaultValue("debezium.sink.iceberg.destination-lowercase-table-names", "false")
                 .withDefaultValue("debezium.sink.iceberg.upsert", "false")
                 .withDefaultValue("debezium.sink.iceberg.upsert-keep-deletes", "true")
+                .withDefaultValue("debezium.sink.iceberg.upsert-write-mode", "merge-on-read")
                 .withDefaultValue("debezium.sink.iceberg.create-identifier-fields", "true")
                 .withDefaultValue("debezium.sink.iceberg.allow-field-addition", "true")
                 .withDefaultValue("debezium.sink.iceberg.preserve-required-property", "false")
@@ -110,5 +110,32 @@ class IcebergConfigTest {
         assertEquals(" bucket(10, customer_id)", partitions.get(2));
         assertEquals(" region", partitions.get(3));
         assertEquals(" truncate(5, name)", partitions.get(4));
+    }
+
+    @Test
+    void testUpsertWriteModeDefaultsToMergeOnRead() {
+        IcebergConfig icebergConfig = getIcebergConfig(Collections.emptyMap());
+        assertEquals("merge-on-read", icebergConfig.upsertWriteMode());
+        assertFalse(icebergConfig.isUpsertCopyOnWriteMode());
+        Assertions.assertDoesNotThrow(icebergConfig::validateUpsertWriteMode);
+    }
+
+    @Test
+    void testUpsertWriteModeCopyOnWrite() {
+        Map<String, String> config = Map.of(
+                "debezium.sink.iceberg.upsert-write-mode", "copy-on-write");
+        IcebergConfig icebergConfig = getIcebergConfig(config);
+        assertTrue(icebergConfig.isUpsertCopyOnWriteMode());
+        Assertions.assertDoesNotThrow(icebergConfig::validateUpsertWriteMode);
+    }
+
+    @Test
+    void testUpsertWriteModeValidationFailsForUnsupportedValues() {
+        Map<String, String> config = Map.of(
+                "debezium.sink.iceberg.upsert-write-mode", "invalid-mode");
+        IcebergConfig icebergConfig = getIcebergConfig(config);
+        DebeziumException exception = Assertions.assertThrows(
+                DebeziumException.class, icebergConfig::validateUpsertWriteMode);
+        assertTrue(exception.getMessage().contains("Unsupported upsert write mode"));
     }
 }

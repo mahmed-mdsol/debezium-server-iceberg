@@ -93,6 +93,7 @@ class IcebergConfigTest {
         IcebergConfig icebergConfig = getIcebergConfig(Collections.emptyMap());
         assertFalse(icebergConfig.partitionBy().isPresent());
         assertTrue(icebergConfig.partitionBy().isEmpty());
+        assertTrue(icebergConfig.tableFormatVersion().isEmpty());
     }
 
     @Test
@@ -110,5 +111,13 @@ class IcebergConfigTest {
         assertEquals(" bucket(10, customer_id)", partitions.get(2));
         assertEquals(" region", partitions.get(3));
         assertEquals(" truncate(5, name)", partitions.get(4));
+    }
+
+    @Test
+    void testTableFormatVersion() {
+        IcebergConfig icebergConfig =
+                getIcebergConfig(Map.of("debezium.sink.iceberg.table-format-version", "3"));
+
+        assertEquals(Optional.of(3), icebergConfig.tableFormatVersion());
     }
 }

@@ -20,6 +20,10 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import org.apache.iceberg.DeleteFile;
+import org.apache.iceberg.FileFormat;
+import org.apache.iceberg.Table;
+import org.apache.iceberg.catalog.TableIdentifier;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.junit.jupiter.api.Assertions;
@@ -66,6 +70,7 @@ public class IcebergChangeConsumerUpsertDeleteDeletesTest extends BaseSparkTest 
     Assertions.assertEquals(ds.where("id = 3 AND __op= 'u'").count(), 1);
     Assertions.assertEquals(ds.where("id = 3 AND first_name= 'UpdatednameV1'").count(), 1);
     Assertions.assertEquals(ds.where("id = 4 AND __op= 'c'").count(), 1);
+    assertDeleteVectorsCommitted("testc.inventory.customers_upsert");
 
     records.clear();
     // in case of duplicate records it should only keep the latest one
@@ -140,7 +145,24 @@ public class IcebergChangeConsumerUpsertDeleteDeletesTest extends BaseSparkTest 
       Map<String, String> config = new HashMap<>();
       config.put("debezium.sink.iceberg.upsert", "true");
       config.put("debezium.sink.iceberg.upsert-keep-deletes", "false");
+      config.put("debezium.sink.iceberg.table-format-version", "3");
       return config;
     }
+  }
+
+  private void assertDeleteVectorsCommitted(String destination) {
+    Table table =
+        consumer.loadIcebergTable(
+            TableIdentifier.of(namespace, "debeziumcdc_" + destination.replace(".", "_")), null);
+    table.refresh();
+    Assertions.assertEquals("3", table.properties().get("format-version"));
+
+    List<DeleteFile> deleteFiles = new ArrayList<>();
+    table.currentSnapshot().addedDeleteFiles(table.io()).forEach(deleteFiles::add);
+    Assertions.assertFalse(deleteFiles.isEmpty());
+    Assertions.assertTrue(
+        deleteFiles.stream().allMatch(deleteFile -> FileFormat.PUFFIN.equals(deleteFile.format())));
+    Assertions.assertTrue(
+        deleteFiles.stream().allMatch(deleteFile -> deleteFile.referencedDataFile() != null));
   }
 }

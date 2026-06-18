@@ -104,6 +104,9 @@ public interface IcebergConfig {
   @WithDefault("false")
   boolean openlineageEnabled();
 
+  @WithName("debezium.sink.iceberg.table-format-version")
+  Optional<Integer> tableFormatVersion();
+
   /** Gets the partitionBy value for a given table, falling back to global if not specified. */
   default List<String> partitionByForTable(String destination) {
     return partitionBy().orElse(List.of());

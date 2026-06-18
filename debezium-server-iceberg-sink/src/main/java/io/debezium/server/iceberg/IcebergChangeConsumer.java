@@ -362,10 +362,9 @@ public class IcebergChangeConsumer
           config.iceberg().partitionByForTable(sampleEvent.destination());
       PartitionSpec spec = IcebergUtil.createPartitionSpec(schema, partitionByOptions);
 
-      // for backward compatibility, to be removed and set to "3" with one of the next
-      // releases
-      // Format 3 will be used when variant data type is used
-      final String tableFormatVersion = config.iceberg().nestedAsVariant() ? "3" : "2";
+      // keep existing variant behavior unless the format version is configured explicitly
+      final String tableFormatVersion =
+          String.valueOf(config.iceberg().tableFormatVersion().orElse(config.iceberg().nestedAsVariant() ? 3 : 2));
       return IcebergUtil.createIcebergTable(
           icebergCatalog,
           tableId,

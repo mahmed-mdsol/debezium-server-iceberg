@@ -5,6 +5,7 @@ debezium.sink.type=iceberg
 debezium.sink.iceberg.table-prefix=debeziumcdc_
 debezium.sink.iceberg.upsert=true
 debezium.sink.iceberg.upsert-keep-deletes=true
+debezium.sink.iceberg.table-format-version=3
 debezium.sink.iceberg.write.format.default=parquet
 debezium.sink.iceberg.catalog-name=iceberg
 

@@ -230,7 +230,7 @@ public class IcebergTableOperator {
         useDeleteVectors
             ? writerFactory.createAppend(icebergTable)
             : writerFactory.create(icebergTable);
-    List<RecordWrapper> recordsToDelete = useDeleteVectors ? new ArrayList<>() : List.of();
+    List<RecordWrapper> recordsToDelete = new ArrayList<>();
     try (writer) {
       for (EventConverter e : events) {
         final RecordWrapper record =
@@ -318,11 +318,11 @@ public class IcebergTableOperator {
   private boolean shouldUseDeleteVectors(Table icebergTable) {
     return config.iceberg().upsert()
         && !icebergTable.schema().identifierFieldIds().isEmpty()
-        && Integer.parseInt(icebergTable.properties().getOrDefault("format-version", "2")) >= 3;
+        && tableFormatVersion(icebergTable) >= 3;
   }
 
   private boolean requiresDelete(RecordWrapper record) {
-    return !(record.isNewKey() && !config.iceberg().keepDeletes() && record.op() != Operation.DELETE);
+    return record.op() == Operation.DELETE || !record.isNewKey() || config.iceberg().keepDeletes();
   }
 
   private boolean shouldWriteRecord(RecordWrapper record) {
@@ -418,5 +418,17 @@ public class IcebergTableOperator {
       }
     }
     return filter;
+  }
+
+  private int tableFormatVersion(Table icebergTable) {
+    try {
+      return Integer.parseInt(icebergTable.properties().getOrDefault("format-version", "2"));
+    } catch (NumberFormatException e) {
+      LOGGER.warn(
+          "Invalid format-version '{}' for table '{}', defaulting to v2",
+          icebergTable.properties().get("format-version"),
+          icebergTable.name());
+      return 2;
+    }
   }
 }

@@ -161,7 +161,7 @@ public class IcebergChangeConsumerUpsertDeleteDeletesTest extends BaseSparkTest 
     table.currentSnapshot().addedDeleteFiles(table.io()).forEach(deleteFiles::add);
     Assertions.assertFalse(deleteFiles.isEmpty());
     Assertions.assertTrue(
-        deleteFiles.stream().allMatch(deleteFile -> deleteFile.format() == FileFormat.PUFFIN));
+        deleteFiles.stream().allMatch(deleteFile -> FileFormat.PUFFIN.equals(deleteFile.format())));
     Assertions.assertTrue(
         deleteFiles.stream().allMatch(deleteFile -> deleteFile.referencedDataFile() != null));
   }

@@ -16,6 +16,7 @@ import io.debezium.openlineage.ConnectorContext;
 import io.debezium.openlineage.DebeziumOpenLineageEmitter;
 import io.debezium.openlineage.dataset.DatasetMetadata;
 import io.debezium.server.iceberg.GlobalConfig;
+import io.debezium.server.iceberg.IcebergUtil;
 import io.debezium.server.iceberg.converter.EventConverter;
 import io.debezium.server.iceberg.converter.SchemaConverter;
 import jakarta.enterprise.context.Dependent;
@@ -27,14 +28,31 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 import org.apache.iceberg.AppendFiles;
+import org.apache.iceberg.DataFile;
+import org.apache.iceberg.DeleteFile;
+import org.apache.iceberg.FileContent;
+import org.apache.iceberg.FileFormat;
+import org.apache.iceberg.FileScanTask;
+import org.apache.iceberg.MetadataColumns;
 import org.apache.iceberg.RowDelta;
 import org.apache.iceberg.Schema;
 import org.apache.iceberg.Table;
 import org.apache.iceberg.UpdateSchema;
+import org.apache.iceberg.data.IcebergGenerics;
 import org.apache.iceberg.data.Record;
+import org.apache.iceberg.deletes.BaseDVFileWriter;
+import org.apache.iceberg.deletes.DVFileWriter;
+import org.apache.iceberg.expressions.Expression;
+import org.apache.iceberg.expressions.Expressions;
 import org.apache.iceberg.io.BaseTaskWriter;
+import org.apache.iceberg.io.CloseableIterable;
+import org.apache.iceberg.io.DeleteWriteResult;
 import org.apache.iceberg.io.WriteResult;
+import org.apache.iceberg.types.TypeUtil;
+import org.apache.iceberg.types.Types;
+import org.apache.iceberg.util.CharSequenceSet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -203,23 +221,41 @@ public class IcebergTableOperator {
    * @param events
    */
   private void addToTablePerSchema(Table icebergTable, List<EventConverter> events) {
-    // Initialize a task writer to write both INSERT and equality DELETE.
+    // Initialize a task writer to write data and, when needed, row-level deletes.
     final Schema tableSchema = icebergTable.schema();
-    BaseTaskWriter<Record> writer = writerFactory.create(icebergTable);
+    final boolean useDeleteVectors = shouldUseDeleteVectors(icebergTable);
+    final Schema identifierSchema =
+        TypeUtil.select(tableSchema, tableSchema.identifierFieldIds());
+    BaseTaskWriter<Record> writer =
+        useDeleteVectors
+            ? writerFactory.createAppend(icebergTable)
+            : writerFactory.create(icebergTable);
+    List<RecordWrapper> recordsToDelete = useDeleteVectors ? new ArrayList<>() : List.of();
     try (writer) {
       for (EventConverter e : events) {
         final RecordWrapper record =
             (config.iceberg().upsert() && !tableSchema.identifierFieldIds().isEmpty())
                 ? e.convert(tableSchema)
                 : e.convertAsAppend(tableSchema);
-        writer.write(record);
+        if (useDeleteVectors && requiresDelete(record)) {
+          recordsToDelete.add(record);
+        }
+        if (!useDeleteVectors || shouldWriteRecord(record)) {
+          writer.write(record);
+        }
       }
 
       WriteResult files = writer.complete();
-      if (files.deleteFiles().length > 0) {
+      DeleteWriteResult deleteVectors =
+          useDeleteVectors
+              ? writeDeleteVectors(icebergTable, identifierSchema, recordsToDelete)
+              : new DeleteWriteResult(List.of(), CharSequenceSet.empty(), List.of());
+
+      if (files.deleteFiles().length > 0 || !deleteVectors.deleteFiles().isEmpty()) {
         RowDelta newRowDelta = icebergTable.newRowDelta();
         Arrays.stream(files.dataFiles()).forEach(newRowDelta::addRows);
         Arrays.stream(files.deleteFiles()).forEach(newRowDelta::addDeletes);
+        deleteVectors.deleteFiles().forEach(newRowDelta::addDeletes);
         newRowDelta.commit();
       } else {
         AppendFiles appendFiles = icebergTable.newAppend();
@@ -277,5 +313,110 @@ public class IcebergTableOperator {
 
     DebeziumOpenLineageEmitter.emit(
         getOpenLineageContext(), DebeziumTaskState.RUNNING, List.of(metadata));
+  }
+
+  private boolean shouldUseDeleteVectors(Table icebergTable) {
+    return config.iceberg().upsert()
+        && !icebergTable.schema().identifierFieldIds().isEmpty()
+        && Integer.parseInt(icebergTable.properties().getOrDefault("format-version", "2")) >= 3;
+  }
+
+  private boolean requiresDelete(RecordWrapper record) {
+    return !(record.isNewKey() && !config.iceberg().keepDeletes() && record.op() != Operation.DELETE);
+  }
+
+  private boolean shouldWriteRecord(RecordWrapper record) {
+    return record.op() != Operation.DELETE || config.iceberg().keepDeletes();
+  }
+
+  private DeleteWriteResult writeDeleteVectors(
+      Table icebergTable, Schema identifierSchema, List<RecordWrapper> recordsToDelete)
+      throws IOException {
+    if (recordsToDelete.isEmpty() || icebergTable.currentSnapshot() == null) {
+      return new DeleteWriteResult(List.of(), CharSequenceSet.empty(), List.of());
+    }
+
+    Expression filter = buildDeleteVectorFilter(identifierSchema, recordsToDelete);
+    if (filter == null) {
+      return new DeleteWriteResult(List.of(), CharSequenceSet.empty(), List.of());
+    }
+
+    Map<String, DataFile> dataFilesByPath = new ConcurrentHashMap<>();
+    Map<String, List<DeleteFile>> currentPositionDeletesByPath = new ConcurrentHashMap<>();
+    try (CloseableIterable<FileScanTask> tasks = icebergTable.newScan().filter(filter).planFiles()) {
+      for (FileScanTask task : tasks) {
+        String path = task.file().location().toString();
+        dataFilesByPath.put(path, task.file());
+        List<DeleteFile> currentPositionDeletes = new ArrayList<>();
+        task.deletes()
+            .forEach(
+                deleteFile -> {
+                  if (deleteFile.content() == FileContent.POSITION_DELETES) {
+                    currentPositionDeletes.add(deleteFile);
+                  }
+                });
+        if (!currentPositionDeletes.isEmpty()) {
+          currentPositionDeletesByPath.put(path, currentPositionDeletes);
+        }
+      }
+    }
+
+    if (dataFilesByPath.isEmpty()) {
+      return new DeleteWriteResult(List.of(), CharSequenceSet.empty(), List.of());
+    }
+
+    Schema scanSchema =
+        new Schema(
+            Stream.concat(
+                    identifierSchema.columns().stream(),
+                    Stream.of(MetadataColumns.FILE_PATH, MetadataColumns.SPEC_ID, MetadataColumns.ROW_POSITION))
+                .toList());
+    DVFileWriter dvWriter =
+        new BaseDVFileWriter(
+            IcebergUtil.getTableOutputFileFactory(icebergTable, FileFormat.PUFFIN),
+            path -> {
+              List<DeleteFile> deleteFiles = currentPositionDeletesByPath.get(path);
+              if (deleteFiles == null || deleteFiles.isEmpty()) {
+                return null;
+              }
+              return new org.apache.iceberg.data.BaseDeleteLoader(
+                      deleteFile -> icebergTable.io().newInputFile(deleteFile))
+                  .loadPositionDeletes(deleteFiles, path);
+            });
+
+    try (dvWriter;
+        CloseableIterable<Record> existingRows =
+            IcebergGenerics.read(icebergTable).project(scanSchema).where(filter).build()) {
+      for (Record existingRow : existingRows) {
+        String path = existingRow.getField(MetadataColumns.FILE_PATH.name()).toString();
+        DataFile dataFile = dataFilesByPath.get(path);
+        if (dataFile == null) {
+          continue;
+        }
+        Integer specId = (Integer) existingRow.getField(MetadataColumns.SPEC_ID.name());
+        Long rowPosition = (Long) existingRow.getField(MetadataColumns.ROW_POSITION.name());
+        dvWriter.delete(path, rowPosition, icebergTable.specs().get(specId), dataFile.partition());
+      }
+    }
+
+    return dvWriter.result();
+  }
+
+  private Expression buildDeleteVectorFilter(
+      Schema identifierSchema, List<RecordWrapper> recordsToDelete) {
+    Expression filter = null;
+    for (RecordWrapper record : recordsToDelete) {
+      Expression recordFilter = null;
+      for (Types.NestedField field : identifierSchema.columns()) {
+        Object value = record.getField(field.name());
+        Expression fieldFilter =
+            value == null ? Expressions.isNull(field.name()) : Expressions.equal(field.name(), value);
+        recordFilter = recordFilter == null ? fieldFilter : Expressions.and(recordFilter, fieldFilter);
+      }
+      if (recordFilter != null) {
+        filter = filter == null ? recordFilter : Expressions.or(filter, recordFilter);
+      }
+    }
+    return filter;
   }
 }
